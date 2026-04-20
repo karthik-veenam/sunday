@@ -1,0 +1,36 @@
+# Credentials & local config
+config.json
+mac_config.json
+
+# Database & runtime state
+*.db
+last_suggestions.json
+sunday_insights.md
+
+# Wake word model & training samples
+*.onnx
+*.wav
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
