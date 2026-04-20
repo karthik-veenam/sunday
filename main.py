@@ -24,6 +24,87 @@ import tools
 
 GOODBYE = {"goodbye", "bye sunday", "that's all", "thats all", "stop listening"}
 
+# ── Fast-path device commands (skip LLM entirely) ─────────────────────────────
+import re as _re
+
+_GA_DEVICES = {
+    "fan": "fan",
+    "light 1": "light 1", "light one": "light 1",
+    "light 2": "light 2", "light two": "light 2",
+    "cove": "cove light", "cove light": "cove light",
+    "foot lamp": "foot lamp", "foot light": "foot lamp",
+    "fan light": "fan light",
+    "spots": "spots", "spot lights": "spots", "spotlights": "spots",
+    "all lights": "all lights", "lights": "all lights",
+}
+_DIRECT_DEVICES = {"ac", "geyser", "projector", "fan"}
+_FAN_SPEEDS = {"high", "medium", "low", "fast", "slow"}
+
+_ON_WORDS  = r"(?:turn\s+on|switch\s+on|put\s+on|on)"
+_OFF_WORDS = r"(?:turn\s+off|switch\s+off|put\s+off|off)"
+_DEVICE_PAT = _re.compile(
+    r"^(?:" + _ON_WORDS + r"\s+(?P<on_dev>.+?)|"
+    + r"(?P<on2_dev>.+?)\s+" + _ON_WORDS + r"|"
+    + _OFF_WORDS + r"\s+(?P<off_dev>.+?)|"
+    + r"(?P<off2_dev>.+?)\s+" + _OFF_WORDS + r")$",
+    _re.IGNORECASE,
+)
+_FAN_SPEED_PAT = _re.compile(
+    r"^(?:set\s+)?fan\s+(?:speed\s+)?(?:to\s+)?(?P<speed>high|medium|low|fast|slow)$",
+    _re.IGNORECASE,
+)
+
+
+async def _fast_path(text: str, tts) -> bool:
+    """Try to handle simple device commands without hitting the LLM.
+    Returns True if handled, False to fall through to agent."""
+    t = text.strip().rstrip(".,!?")
+
+    # Fan speed
+    m = _FAN_SPEED_PAT.match(t)
+    if m:
+        speed = m.group("speed").lower()
+        speed = "medium" if speed == "slow" else ("high" if speed == "fast" else speed)
+        await tools.execute("send_google_assistant_command",
+                            {"command": f"set fan to {speed} in RoKa's room"}, text)
+        await tts.speak(f"Fan set to {speed}.")
+        await ui.emit({"type": "idle"})
+        return True
+
+    # On/off pattern
+    m = _DEVICE_PAT.match(t)
+    if not m:
+        return False
+
+    raw_dev = (m.group("on_dev") or m.group("on2_dev") or "").strip().lower()
+    action   = "on"
+    if not raw_dev:
+        raw_dev = (m.group("off_dev") or m.group("off2_dev") or "").strip().lower()
+        action  = "off"
+    if not raw_dev:
+        return False
+
+    # Normalise device name
+    norm = _GA_DEVICES.get(raw_dev)
+
+    # Direct-control devices (Hogar/Kasa)
+    if raw_dev in _DIRECT_DEVICES:
+        await tools.execute("control_device", {"device": raw_dev, "action": action}, text)
+        await tts.speak(f"{raw_dev.capitalize()} {action}.")
+        await ui.emit({"type": "idle"})
+        return True
+
+    # GA-routed lights / fan
+    if norm:
+        cmd = f"turn {action} {norm} in RoKa's room"
+        await tools.execute("send_google_assistant_command", {"command": cmd}, text)
+        label = norm.title() if norm != "all lights" else "Lights"
+        await tts.speak(f"{label} {action}.")
+        await ui.emit({"type": "idle"})
+        return True
+
+    return False
+
 
 async def _voice_loop(
     mic: MicStream,
@@ -69,6 +150,10 @@ async def _voice_loop(
         while True:
             if any(phrase in transcript.lower() for phrase in GOODBYE):
                 await tts.speak("Goodbye! Call me if you need anything.")
+                agent.reset()
+                break
+
+            if await _fast_path(transcript, tts):
                 agent.reset()
                 break
 
@@ -237,7 +322,8 @@ async def run(config: Config) -> None:
     async def _handle_ui_command(text: str) -> None:
         print(f"[UI Command] {text!r}")
         await ui.emit({"type": "transcript", "text": text})
-        await agent.process(text, tts)
+        if not await _fast_path(text, tts):
+            await agent.process(text, tts)
 
     ui.set_command_handler(_handle_ui_command)
 
