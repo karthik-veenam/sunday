@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 
 from aiohttp import web, WSMsgType
 
@@ -75,6 +76,8 @@ async def run(port: int = 8080) -> None:
     app.router.add_get("/tg", _tg_handler)
     app.router.add_get("/presence", _presence_handler)
     app.router.add_post("/device", _device_handler)
+    app.router.add_get("/.well-known/agent.json", _a2a_card_handler)
+    app.router.add_post("/tasks/send", _a2a_task_handler)
     app.router.add_static("/static", os.path.join(os.path.dirname(__file__), "static"))
 
     runner = web.AppRunner(app)
@@ -128,6 +131,64 @@ async def _index_handler(request: web.Request) -> web.Response:
 async def _tg_handler(request: web.Request) -> web.Response:
     static = os.path.join(os.path.dirname(__file__), "static", "tg.html")
     return web.FileResponse(static)
+
+
+async def _a2a_card_handler(request: web.Request) -> web.Response:
+    card = {
+        "name": "Sunday",
+        "description": "Home voice assistant with presence detection, calendar access, and smart home control.",
+        "url": "http://localhost:8080",
+        "version": "1.0.0",
+        "defaultInputModes": ["text"],
+        "defaultOutputModes": ["text"],
+        "capabilities": {"streaming": False},
+        "skills": [
+            {
+                "id": "presence",
+                "name": "Check Presence",
+                "description": "Check if Karthik is currently home",
+                "tags": ["presence", "home"],
+                "examples": ["is karthik home?", "check presence"],
+            },
+            {
+                "id": "calendar",
+                "name": "Get Calendar",
+                "description": "Get calendar events for today or tomorrow",
+                "tags": ["calendar", "schedule", "meetings"],
+                "examples": ["calendar today", "calendar tomorrow", "any meetings today?"],
+            },
+        ],
+    }
+    return web.json_response(card)
+
+
+async def _a2a_task_handler(request: web.Request) -> web.Response:
+    import tools as _tools
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    task_id = body.get("id", str(uuid.uuid4()))
+    parts = body.get("message", {}).get("parts", [])
+    text = " ".join(p.get("text", "") for p in parts if p.get("type") == "text").lower().strip()
+
+    try:
+        if any(w in text for w in ("presence", "is karthik", "home", "away")):
+            result = await _tools._get_presence()
+        elif any(w in text for w in ("calendar", "schedule", "meeting", "tomorrow", "today", "event")):
+            date_str = "tomorrow" if "tomorrow" in text else "today"
+            result = await _tools._get_calendar(date_str)
+        else:
+            result = await _tools._get_presence()
+    except Exception as e:
+        result = f"Error: {e}"
+
+    return web.json_response({
+        "id": task_id,
+        "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"type": "text", "text": result}]}],
+    })
 
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:

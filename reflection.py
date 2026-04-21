@@ -63,6 +63,11 @@ When should_speak is true, choose a channel:
 - "voice_only": just speak, don't wait for a reply. Use for quick one-way info (e.g. room temp is high, geyser left on).
 - "telegram": send a text message instead of speaking. Use when he might be away from the room, it's late at night, or the message is informational and doesn't need an immediate reply.
 
+Fitness context: fitness_today contains Karthik's calorie/protein/deficit data from FitBot.
+- If it's after 8 PM and he's been in a big deficit all day, a casual mention is fine ("You've barely eaten today" — keep it light).
+- Never read out raw numbers unprompted. Keep it conversational, not clinical.
+- If fitness_today.available is false, ignore this section entirely.
+
 Also generate exactly 3 smart home action suggestions for the dashboard. These are tappable cards \
 that Sunday will immediately execute when clicked — so ONLY suggest things Sunday can actually do \
 right now using her tools: control lights, fan, AC, geyser, projector, set scenes, adjust brightness/color. \
@@ -115,6 +120,7 @@ class ReflectionEngine:
         self._said_today: list[str] = []
         self._last_reset_date: str | None = None
         self._alarm_set_today: bool = False
+        self._badminton_logged_today: bool = False
         self._world_cache: dict | None = None
         self._world_cache_at: float = 0.0
         self._sent_alerts: set[str] = set()
@@ -199,6 +205,7 @@ class ReflectionEngine:
             self._said_today = []
             self._scheduled_thinks = []
             self._alarm_set_today = False
+            self._badminton_logged_today = False
             self._last_reset_date = today
             print("[Reflect] Daily flags reset.")
 
@@ -216,10 +223,12 @@ class ReflectionEngine:
             await asyncio.sleep(3600)
 
     async def scheduler_loop(self) -> None:
-        """Checks every 60s for scheduled_thinks and next_reflect_at timers."""
+        """Checks every 60s for scheduled_thinks, next_reflect_at timers, and daily jobs."""
         while True:
             await asyncio.sleep(600)
-            now_str = datetime.now().strftime("%H:%M")
+            self._reset_daily_flags_if_needed()
+            now = datetime.now()
+            now_str = now.strftime("%H:%M")
 
             for think in list(self._scheduled_thinks):
                 if think.get("at", "99:99") <= now_str:
@@ -229,6 +238,10 @@ class ReflectionEngine:
             if self._next_reflect_at and time.time() >= self._next_reflect_at:
                 self._next_reflect_at = None
                 await self._safe_reflect("quick follow-up")
+
+            # Daily 09:30 badminton check
+            if "09:30" <= now_str <= "09:45" and not self._badminton_logged_today:
+                asyncio.create_task(self._check_and_log_badminton())
 
     # ── core reflect ──────────────────────────────────────────────────────────
 
@@ -508,16 +521,17 @@ class ReflectionEngine:
         except Exception:
             pass
 
-        # Presence, world, room sensors, and calendar in parallel
-        presence_task = asyncio.create_task(self._ping_phone())
-        world_task = asyncio.create_task(self._fetch_world())
-        room_task = asyncio.create_task(self._fetch_room_sensors())
-        cal_today_task = asyncio.create_task(self._fetch_calendar_safe(now.date()))
+        # Presence, world, room sensors, calendar, and fitness in parallel
+        presence_task     = asyncio.create_task(self._ping_phone())
+        world_task        = asyncio.create_task(self._fetch_world())
+        room_task         = asyncio.create_task(self._fetch_room_sensors())
+        cal_today_task    = asyncio.create_task(self._fetch_calendar_safe(now.date()))
         cal_tomorrow_task = asyncio.create_task(self._fetch_calendar_safe(
             (now + timedelta(days=1)).date()
         ))
-        presence, world, room, cal_today, cal_tomorrow = await asyncio.gather(
-            presence_task, world_task, room_task, cal_today_task, cal_tomorrow_task
+        fitness_task      = asyncio.create_task(self._fetch_fitness_summary())
+        presence, world, room, cal_today, cal_tomorrow, fitness = await asyncio.gather(
+            presence_task, world_task, room_task, cal_today_task, cal_tomorrow_task, fitness_task
         )
 
         return {
@@ -538,6 +552,7 @@ class ReflectionEngine:
             "calendar_today": cal_today,
             "calendar_tomorrow": cal_tomorrow,
             "alarm_set_today": self._alarm_set_today,
+            "fitness_today": fitness,
         }
 
     # ── claude call ───────────────────────────────────────────────────────────
@@ -627,6 +642,68 @@ class ReflectionEngine:
                 print(f"[Presence] HA poll error: {e}")
 
             await asyncio.sleep(30)
+
+    async def _check_and_log_badminton(self) -> None:
+        """Daily 09:30 check: was Karthik away 30+ min between 08:00–09:30? Log badminton."""
+        if self._badminton_logged_today:
+            return
+        self._badminton_logged_today = True  # mark immediately to prevent double-fire
+
+        try:
+            now = datetime.now()
+            today_prefix = now.strftime("%Y-%m-%d")
+            window_start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            window_end   = now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+            # Collect presence entries in the 08:00–09:30 window (newest first)
+            entries = memory_module.get().recent_presence(limit=50)
+            window_entries = []
+            for e in reversed(entries):  # oldest first
+                try:
+                    ts = datetime.fromisoformat(e["timestamp"])
+                    if window_start <= ts <= window_end:
+                        window_entries.append((ts, e["state"]))
+                except Exception:
+                    continue
+
+            # Calculate total away-time in window
+            away_seconds = 0.0
+            prev_ts: datetime | None = None
+            prev_state: str | None = None
+            for ts, state in window_entries:
+                if prev_ts is not None and prev_state == "away":
+                    away_seconds += (ts - prev_ts).total_seconds()
+                prev_ts = ts
+                prev_state = state
+            # Count time from last entry to window_end if still away
+            if prev_ts and prev_state == "away" and prev_ts < window_end:
+                away_seconds += (min(now, window_end) - prev_ts).total_seconds()
+
+            away_mins = away_seconds / 60
+            print(f"[Badminton] Away time 08:00–09:30: {away_mins:.1f} min")
+
+            if away_mins >= 30:
+                # Badminton confirmed — log to FitBot
+                from a2a_client import call_fitbot
+                result = await call_fitbot("log 60 min badminton for karthik")
+                print(f"[Badminton] FitBot log result: {result}")
+                await self._send_telegram(f"Logged badminton (60 min, ~400 cal) to FitBot. Good game!")
+            else:
+                # Home all morning — ask if skipped
+                await self._send_telegram("Skipped badminton today?")
+
+        except Exception as e:
+            print(f"[Badminton] Check error: {e}")
+            self._badminton_logged_today = False  # allow retry on error
+
+    async def _fetch_fitness_summary(self) -> dict:
+        """Fetch today's fitness summary from FitBot via A2A."""
+        try:
+            from a2a_client import call_fitbot
+            result = await call_fitbot("karthik today summary")
+            return {"available": True, "raw": result}
+        except Exception as e:
+            return {"available": False, "error": str(e)}
 
     async def _on_arrival(self) -> None:
         """Announce arrival via TTS if it's a reasonable hour."""

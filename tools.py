@@ -236,6 +236,24 @@ DEFINITIONS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "ask_fitbot",
+        "description": (
+            "Ask FitBot for fitness data: calories consumed today, protein, calorie deficit, "
+            "week summary, or weight history. Use for any question about Karthik's or Sravya's "
+            "food intake, workouts, or fitness progress. Pass the question as natural language."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language fitness question, e.g. 'how many calories has karthik had today', 'karthik week summary', 'sravya protein today'",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # Hogar Z-wave devices (direct LAN control + real-time state)
@@ -416,6 +434,10 @@ async def _execute(name: str, inputs: dict) -> str:
             return answer if answer else f"No quick answer found for: {query}"
         except Exception as e:
             return f"Search failed: {e}"
+
+    if name == "ask_fitbot":
+        from a2a_client import call_fitbot
+        return await call_fitbot(inputs["query"])
 
     if name == "end_conversation":
         return "ok"
