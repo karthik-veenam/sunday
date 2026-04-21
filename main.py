@@ -322,8 +322,12 @@ async def run(config: Config) -> None:
     async def _handle_ui_command(text: str) -> None:
         print(f"[UI Command] {text!r}")
         await ui.emit({"type": "transcript", "text": text})
-        if not await _fast_path(text, tts):
-            await agent.process(text, tts)
+        await ui.emit({"type": "thinking"})
+        if await _fast_path(text, tts):
+            return
+        reply = await agent.respond_as_text(text)
+        if reply:
+            await ui.emit({"type": "assistant_message", "text": reply})
 
     ui.set_command_handler(_handle_ui_command)
 
