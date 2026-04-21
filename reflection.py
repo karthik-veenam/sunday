@@ -645,55 +645,45 @@ class ReflectionEngine:
             await asyncio.sleep(30)
 
     async def _check_and_log_badminton(self) -> None:
-        """Daily 09:30 check: was Karthik away 30+ min between 08:00–09:30? Log badminton."""
+        """Daily 09:30 check: did the phone enter the 'badminton' zone this morning?"""
         if self._badminton_logged_today:
             return
         self._badminton_logged_today = True  # mark immediately to prevent double-fire
 
         try:
             now = datetime.now()
-            today_prefix = now.strftime("%Y-%m-%d")
-            window_start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            window_start = now.replace(hour=7, minute=0, second=0, microsecond=0)
             window_end   = now.replace(hour=9, minute=30, second=0, microsecond=0)
 
-            # Collect presence entries in the 08:00–09:30 window (newest first)
+            # Look for a "badminton" zone entry in today's morning window
             entries = memory_module.get().recent_presence(limit=50)
-            window_entries = []
+            was_at_badminton = False
+            was_away = False
             for e in reversed(entries):  # oldest first
                 try:
                     ts = datetime.fromisoformat(e["timestamp"])
                     if window_start <= ts <= window_end:
-                        # normalise: anything that isn't "home" counts as away
-                        state = "home" if e["state"] == "home" else "away"
-                        window_entries.append((ts, state))
+                        zone = e["state"].lower()
+                        if zone == "badminton":
+                            was_at_badminton = True
+                            break
+                        if zone != "home":
+                            was_away = True
                 except Exception:
                     continue
 
-            # Calculate total away-time in window
-            away_seconds = 0.0
-            prev_ts: datetime | None = None
-            prev_state: str | None = None
-            for ts, state in window_entries:
-                if prev_ts is not None and prev_state == "away":
-                    away_seconds += (ts - prev_ts).total_seconds()
-                prev_ts = ts
-                prev_state = state
-            # Count time from last entry to window_end if still away
-            if prev_ts and prev_state == "away" and prev_ts < window_end:
-                away_seconds += (min(now, window_end) - prev_ts).total_seconds()
+            print(f"[Badminton] Morning check — at badminton zone: {was_at_badminton}, was away: {was_away}")
 
-            away_mins = away_seconds / 60
-            print(f"[Badminton] Away time 08:00–09:30: {away_mins:.1f} min")
-
-            if away_mins >= 30:
-                # Badminton confirmed — log to FitBot
+            if was_at_badminton:
+                # Certain — zone confirmed it
                 from a2a_client import call_fitbot
                 result = await call_fitbot("log 60 min badminton for karthik")
                 print(f"[Badminton] FitBot log result: {result}")
-                await self._send_telegram(f"Logged badminton (60 min, ~400 cal) to FitBot. Good game!")
-            else:
+                await self._send_telegram("Logged badminton (60 min, ~400 cal) to FitBot. Good game!")
+            elif not was_away:
                 # Home all morning — ask if skipped
                 await self._send_telegram("Skipped badminton today?")
+            # If was_away but not badminton zone — went somewhere else, say nothing
 
         except Exception as e:
             print(f"[Badminton] Check error: {e}")
