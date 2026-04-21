@@ -15,6 +15,7 @@ _clients: set[web.WebSocketResponse] = set()
 _command_handler = None  # async callable(text: str) set by main.py
 _state_cache: dict[str, dict] = {}  # last seen event per type, replayed to new clients
 _presence_last_seen: dict[str, float] = {"phone": 0.0}  # seeded → starts as away
+_presence_zone: dict[str, str] = {"phone": "unknown"}   # last known zone per device
 _PRESENCE_TIMEOUT = 2 * 60  # seconds
 
 
@@ -23,9 +24,16 @@ def get_presence() -> dict[str, bool]:
     return {device: (now - ts) < _PRESENCE_TIMEOUT for device, ts in _presence_last_seen.items()}
 
 
-def update_presence(label: str, home: bool) -> None:
-    """Called by presence_loop to authoritatively set device presence."""
+def get_presence_zone(label: str = "phone") -> str:
+    """Return the last known zone string for a device (e.g. 'home', 'work', 'not_home')."""
+    return _presence_zone.get(label, "unknown")
+
+
+def update_presence(label: str, home: bool, zone: str | None = None) -> None:
+    """Called by presence_loop to authoritatively set device presence and zone."""
     _presence_last_seen[label] = time.time() if home else 0.0
+    if zone:
+        _presence_zone[label] = zone
 
 _SUGGESTIONS_FILE = os.path.join(os.path.dirname(__file__), "last_suggestions.json")
 

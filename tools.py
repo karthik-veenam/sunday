@@ -666,8 +666,11 @@ async def _get_presence() -> str:
     import web as _web
     presence = _web.get_presence()
     home = presence.get("phone", False)
-    summary = "Karthik is " + ("home" if home else "away") + "."
-    return summary
+    zone = _web.get_presence_zone("phone")
+    if zone and zone not in ("unknown", "not_home"):
+        location = zone.replace("_", " ").title()  # e.g. "Work", "Gym"
+        return f"Karthik is at {location}."
+    return "Karthik is " + ("home" if home else "away") + "."
 
 
 async def _get_ssh_address() -> str:

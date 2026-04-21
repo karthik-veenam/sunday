@@ -586,7 +586,8 @@ class ReflectionEngine:
         """Read current presence state (kept fresh by presence_loop)."""
         presence = ui.get_presence()
         home = presence.get("phone", False)
-        return {"home": home, "phone": home}
+        zone = ui.get_presence_zone("phone")  # e.g. "home", "work", "not_home"
+        return {"home": home, "phone": home, "zone": zone}
 
     async def presence_loop(self) -> None:
         """Poll HA device_tracker every 30s — reliable across all WiFi extenders.
@@ -605,39 +606,39 @@ class ReflectionEngine:
         try:
             last_entries = memory_module.get().recent_presence(limit=1)
             if last_entries:
-                db_state = last_entries[0]["state"]  # "home" or "away"
-                last_state: str | None = "home" if db_state == "home" else "not_home"
+                db_state = last_entries[0]["state"]  # stored zone string
+                last_state: str | None = db_state
+                ui.update_presence("phone", db_state == "home", zone=db_state)
             else:
                 last_state = None
         except Exception:
             last_state = None
-
-        # Immediately sync UI with DB-derived state
-        if last_state is not None:
-            ui.update_presence("phone", last_state == "home")
 
         print(f"[Presence] Polling {entity} via HA every 30s (last known: {last_state!r})...")
 
         while True:
             try:
                 data = await self._ha.get_state(entity)
-                state = data.get("state", "unknown")
+                # HA returns "home", "not_home", or a zone slug like "work", "gym", etc.
+                raw = data.get("state", "unknown").lower().strip()
 
-                # Always refresh UI timestamp every poll — keeps 2-min presence window alive
-                if state in ("home", "not_home"):
-                    ui.update_presence("phone", state == "home")
+                # Normalise: "not_home" → keep as-is; named zones pass through
+                zone = raw  # e.g. "home", "work", "not_home", "unknown"
+                is_home = zone == "home"
 
-                # Only log to DB and fire arrival hook on actual transitions
-                if state != last_state and state in ("home", "not_home"):
-                    print(f"[Presence] {entity}: {last_state!r} -> {state!r}")
-                    is_home = state == "home"
+                # Always refresh UI timestamp every poll — keeps presence window alive
+                ui.update_presence("phone", is_home, zone=zone)
+
+                # Only log to DB and fire hooks on actual zone transitions
+                if zone != last_state and zone != "unknown":
                     was_home = last_state == "home"
-                    memory_module.get().log_presence("home" if is_home else "away")
+                    print(f"[Presence] {entity}: {last_state!r} → {zone!r}")
+                    memory_module.get().log_presence(zone)
 
                     if is_home and not was_home:
                         asyncio.create_task(self._on_arrival())
 
-                    last_state = state
+                    last_state = zone
             except Exception as e:
                 print(f"[Presence] HA poll error: {e}")
 
@@ -662,7 +663,9 @@ class ReflectionEngine:
                 try:
                     ts = datetime.fromisoformat(e["timestamp"])
                     if window_start <= ts <= window_end:
-                        window_entries.append((ts, e["state"]))
+                        # normalise: anything that isn't "home" counts as away
+                        state = "home" if e["state"] == "home" else "away"
+                        window_entries.append((ts, state))
                 except Exception:
                     continue
 
